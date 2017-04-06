@@ -13,9 +13,11 @@ var yargs = require('yargs')
             default: process.cwd()
         }
     })
+    .count('debug')
     .example('$0 -o ./tpn', 'run the tool and output text and backing json to ${projectRoot}/tpn directory.')
     .example('$0 -b ./some/path/to/projectDir', 'run the tool for Bower/NPM projects in another directory.')
-    .example('$0 -o tpn -b ./some/path/to/projectDir', 'run the tool in some other directory and dump the output in a directory called "tpn" there.');
+    .example('$0 -o tpn -b ./some/path/to/projectDir', 'run the tool in some other directory and dump the output in a directory called "tpn" there.')
+    .example('$0 -d', 'run the tool with defaults but enable debug logging to troubleshoot weirdness ;).');
 
 if (yargs.argv.help) {
     yargs.showHelp();
@@ -46,6 +48,13 @@ var licenseCheckerCustomFormat = {
     licenseModified: false
 }
 
+function log_debug() {
+    if (yargs.argv.debug > 0) {
+        console.log.apply(console, arguments);
+    }
+}
+function log_info() { console.log.apply(console, arguments); }
+
 /**
  * Helpers
  */
@@ -56,77 +65,89 @@ function getAttributionForAuthor(a) {
 function getNpmLicenses() {
     // first - check that this is even a bower project
     if (!jetpack.exists(path.join(options.baseDir, 'package.json'))) {
-        console.log('this does not look like an NPM project, skipping NPM checks.');
+        log_info('this does not look like an NPM project, skipping NPM checks.');
         return [];
     }
 
     return bluebird.fromCallback((cb) => {
+        log_debug('kicking off license-checker for NPM issue');
         return npmchecker.init({
             start: options.baseDir,
             production: true,
             customFormat: licenseCheckerCustomFormat
         }, cb);
     })
-    .then((result) => {
-        // we want to exclude the top-level project from being included
-        var topLevelProjectInfo = jetpack.read(path.join(options.baseDir, 'package.json'), 'json');
-        var keys = Object.getOwnPropertyNames(result).filter((k) => {
-            return k !== `${topLevelProjectInfo.name}@${topLevelProjectInfo.version}`;
-        });
+        .then((result) => {
+            log_debug('returned from npm license check');
 
-        return bluebird.map(keys, (key) => {
-            console.log('processing', key);
-            var package = result[key];
-            return jetpack.findAsync(path.join(options.baseDir, 'node_modules'), {
-                matching: `**/${package.name}`,
-                directories: true,
-                files: false
-            })
-            .then((hits) => {
-                var pathToExport = '';
-                if (hits && hits.length && hits.length > 0) {
-                    pathToExport = path.resolve(hits[0].trim());
-                    if (jetpack.exists(pathToExport)) {
-                        return pathToExport;
-                    }
-                }
-                // probably a core module, take a guess at it's path
-                var possiblePath = path.resolve(path.join(options.baseDir, 'node_modules', package.name));
-                return jetpack.exists(possiblePath) ? possiblePath : resolution;
-            })
-            .then((packagePath) => {
-                var packageJsonPath = path.join(packagePath, 'package.json');
-                return jetpack.read(packageJsonPath, 'json');
-            })
-            .then((packageJson) => {
-                console.log('processing', packageJson.name);
+            // we want to exclude the top-level project from being included
+            var topLevelProjectInfo = jetpack.read(path.join(options.baseDir, 'package.json'), 'json');
+            var keys = Object.getOwnPropertyNames(result).filter((k) => {
+                return k !== `${topLevelProjectInfo.name}@${topLevelProjectInfo.version}`;
+            });
 
-                var authors = packageJson.author && getAttributionForAuthor(packageJson.author)
-                    || (packageJson.contributors && packageJson.contributors.map((c) => {
-                        return getAttributionForAuthor(c);
-                    }).join(', '))
-                    || (packageJson.maintainers && packageJson.maintainers.map((m) => {
-                        return getAttributionForAuthor(m);
-                    }).join(', '));
+            log_debug('about to process the following:', keys.join(', '));
+            log_debug('baseDir:', options.baseDir);
 
-                var licenseObject = {
-                    ignore: false,
-                    name: package.name,
-                    version: package.version,
-                    authors: authors,
-                    url: package.repository,
-                    license: package.licenses,
-                    licenseText: ''
-                };
+            return bluebird.map(keys, (key) => {
+                log_debug('processing', key);
+                var package = result[key];
+                return jetpack.findAsync(path.join(options.baseDir, 'node_modules'), {
+                    matching: `**/${package.name}`,
+                    directories: true,
+                    files: false
+                })
+                    .catch((err) => {
+                        log_info(err);
+                })    
+                    .then((hits) => {
+                        var pathToExport = '';
+                        if (hits && hits.length && hits.length > 0) {
+                            pathToExport = path.resolve(hits[0].trim());
+                            if (jetpack.exists(pathToExport)) {
+                                log_debug('found', key);
+                                return pathToExport;
+                            }
+                        }
+                        // probably a core module, take a guess at it's path
+                        log_debug('unknown location for', key, '- guessing it may be a core module');
+                        var possiblePath = path.resolve(path.join(options.baseDir, 'node_modules', package.name));
+                        return jetpack.exists(possiblePath) ? possiblePath : resolution;
+                    })
+                    .then((packagePath) => {
+                        var packageJsonPath = path.join(packagePath, 'package.json');
+                        return jetpack.read(packageJsonPath, 'json');
+                    })
+                    .then((packageJson) => {
+                        log_info('processing', packageJson.name);
 
-                if (package.licenseFile && jetpack.exists(package.licenseFile)) {
-                    licenseObject.licenseText = jetpack.read(package.licenseFile);
-                }
+                        var authors = packageJson.author && getAttributionForAuthor(packageJson.author)
+                            || (packageJson.contributors && packageJson.contributors.map((c) => {
+                                return getAttributionForAuthor(c);
+                            }).join(', '))
+                            || (packageJson.maintainers && packageJson.maintainers.map((m) => {
+                                return getAttributionForAuthor(m);
+                            }).join(', '));
 
-                return licenseObject;
+                        var licenseObject = {
+                            ignore: false,
+                            name: package.name,
+                            version: package.version,
+                            authors: authors,
+                            url: package.repository,
+                            license: package.licenses,
+                            licenseText: ''
+                        };
+
+                        if (package.licenseFile && jetpack.exists(package.licenseFile)) {
+                            licenseObject.licenseText = jetpack.read(package.licenseFile);
+                        }
+
+                        log_debug('finished processing', packageJson.name);
+                        return licenseObject;
+                    });
             });
         });
-    });
 }
 
 /**
@@ -146,7 +167,7 @@ function getNpmLicenses() {
 function getBowerLicenses() {
     // first - check that this is even a bower project
     if (!jetpack.exists(path.join(options.baseDir, 'bower.json'))) {
-        console.log('this does not look like a Bower project, skipping Bower checks.');
+        log_info('this does not look like a Bower project, skipping Bower checks.');
         return [];
     }
 
@@ -160,16 +181,18 @@ function getBowerLicenses() {
              * objective.
              */
             return bluebird.map(result.children, (component) => {
+                log_debug('processing', component.relativePath);
                 var absPath = path.join(bowerComponentsDir, component.relativePath);
                 // npm license check didn't work
                 // try to get the license and package info from .bower.json first
                 // because it has more metadata than the plain bower.json
                 return jetpack.readAsync(path.join(absPath, '.bower.json'), 'json')
                     .catch(() => {
+                        log_debug('couldn\'t find .bower.json for', component.relativePath);
                         return jetpack.readAsync(path.join(absPath, 'bower.json'), 'json');
                     })
                     .then((package) => {
-                        console.log('processing', package.name);
+                        log_info('processing', package.name);
                         // assumptions here based on https://github.com/bower/spec/blob/master/json.md
                         // extract necessary properties as described in TL;DR above
                         var url = package['_source']
@@ -193,7 +216,7 @@ function getBowerLicenses() {
                         // normalize the license object
                         package.license = package.license || package.licenses;
                         var licenses = package.license && _.isString(package.license) ? package.license
-                                : (_.isArray(package.license) ? package.license.join(',') : package.licenses);
+                            : (_.isArray(package.license) ? package.license.join(',') : package.licenses);
 
                         // find the license file if it exists
                         var licensePath = _.find(component.children, (c) => {
@@ -204,6 +227,7 @@ function getBowerLicenses() {
                             licenseText = jetpack.read(path.join(bowerComponentsDir, licensePath.relativePath));
                         }
 
+                        log_debug('finished processing', package.name);
                         return {
                             ignore: false,
                             name: package.name,
@@ -234,55 +258,56 @@ bluebird.all([
     getNpmLicenses(),
     getBowerLicenses()
 ])
-.catch((err) => {
-    console.log(err)
-})    
-.spread((npmOutput, bowerOutput) => {
-    var o = {};
-    _.concat(npmOutput, bowerOutput).forEach((v) => {
-        o[v.name] = v;
-    });
-
-    var userOverridesPath = path.join(options.outputDir, 'overrides.json');
-    if (jetpack.exists(userOverridesPath)) {
-        var userOverrides = jetpack.read(userOverridesPath, 'json');
-        console.log('using overrides:', userOverrides);
-        // foreach override, loop through the properties and assign them to the base object.
-        _.each(Object.getOwnPropertyNames(userOverrides), (objKey) => {
-            _.each(Object.getOwnPropertyNames(userOverrides[objKey]), (objPropKey) => {
-                console.log('overriding', [objKey, objPropKey].join('.'), 'with', userOverrides[objKey][objPropKey]);
-                o[objKey][objPropKey] = userOverrides[objKey][objPropKey];
-            });
+    .catch((err) => {
+        console.log(err)
+    })
+    .spread((npmOutput, bowerOutput) => {
+        var o = {};
+        _.concat(npmOutput, bowerOutput).forEach((v) => {
+            o[v.name] = v;
         });
-    }
-    
-    return o;
-})
-.then((licenseInfo) => {
-    var attribution = Object.getOwnPropertyNames(licenseInfo)
-        .filter((key) => {
-            console.log(key, 'ignore:', licenseInfo[key].ignore);
-            return _.isPlainObject(licenseInfo[key]) && !licenseInfo[key].ignore;
-        })
-        .map((key) => {
-            return `${licenseInfo[key].name}${os.EOL}${licenseInfo[key].version} <${licenseInfo[key].url}>${os.EOL}`
-                + (licenseInfo[key].licenseText
-                    || `license: ${licenseInfo[key].license}${os.EOL}authors: ${licenseInfo[key].authors}`);
-        }).join(`${os.EOL}${os.EOL}******************************${os.EOL}${os.EOL}`);
-    
-    var headerPath = path.join(options.outputDir, 'header.txt');
-    if (jetpack.exists(headerPath)) {
-        var template = jetpack.read(headerPath);
-        console.log('using template', template);
-        attribution = template + os.EOL + os.EOL + attribution;
-    }
 
-    return jetpack.write(path.join(options.outputDir, 'attribution.txt'), attribution);
-})
-.then(() => {
-    console.log('done');
-    process.exit();
-})
-.finally(() => {
-    process.exit(1);
-});
+        var userOverridesPath = path.join(options.outputDir, 'overrides.json');
+        if (jetpack.exists(userOverridesPath)) {
+            var userOverrides = jetpack.read(userOverridesPath, 'json');
+            log_info('using overrides:', userOverrides);
+            // foreach override, loop through the properties and assign them to the base object.
+            _.each(Object.getOwnPropertyNames(userOverrides), (objKey) => {
+                _.each(Object.getOwnPropertyNames(userOverrides[objKey]), (objPropKey) => {
+                    log_debug('overriding', [objKey, objPropKey].join('.'), 'with', userOverrides[objKey][objPropKey]);
+                    o[objKey][objPropKey] = userOverrides[objKey][objPropKey];
+                });
+            });
+        }
+
+        log_info('finished applying overrides.');
+        return o;
+    })
+    .then((licenseInfo) => {
+        var attribution = Object.getOwnPropertyNames(licenseInfo)
+            .filter((key) => {
+                log_debug(key, 'ignore:', licenseInfo[key].ignore);
+                return _.isPlainObject(licenseInfo[key]) && !licenseInfo[key].ignore;
+            })
+            .map((key) => {
+                return `${licenseInfo[key].name}${os.EOL}${licenseInfo[key].version} <${licenseInfo[key].url}>${os.EOL}`
+                    + (licenseInfo[key].licenseText
+                        || `license: ${licenseInfo[key].license}${os.EOL}authors: ${licenseInfo[key].authors}`);
+            }).join(`${os.EOL}${os.EOL}******************************${os.EOL}${os.EOL}`);
+
+        var headerPath = path.join(options.outputDir, 'header.txt');
+        if (jetpack.exists(headerPath)) {
+            var template = jetpack.read(headerPath);
+            log_info('using template', template);
+            attribution = template + os.EOL + os.EOL + attribution;
+        }
+
+        return jetpack.write(path.join(options.outputDir, 'attribution.txt'), attribution);
+    })
+    .then(() => {
+        log_info('done');
+        process.exit();
+    })
+    .finally(() => {
+        process.exit(1);
+    });
