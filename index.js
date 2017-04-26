@@ -99,7 +99,16 @@ function getNpmLicenses() {
                 return jetpack.read(packageJsonPath, 'json');
             })
             .then((packageJson) => {
-                console.log('processing', packageJson.name);
+                if (!packageJson.name) {
+                    var str_pkgJson = '';
+                    try {
+                        str_pkgJson = JSON.stringify(packageJson, null, 2);
+                    } catch (e) {
+                        str_pkgJson = 'ERROR: couldn\'t stringify packageJson';
+                    }
+                    return bluebird.reject(str_pkgJson + '\n\tERROR processing ' + key);
+                } 
+                console.log('processing', packageJson.name, 'from entry:', key);
 
                 var authors = packageJson.author && getAttributionForAuthor(packageJson.author)
                     || (packageJson.contributors && packageJson.contributors.map((c) => {
@@ -261,7 +270,6 @@ bluebird.all([
 .then((licenseInfo) => {
     var attribution = Object.getOwnPropertyNames(licenseInfo)
         .filter((key) => {
-            console.log(key, 'ignore:', licenseInfo[key].ignore);
             return _.isPlainObject(licenseInfo[key]) && !licenseInfo[key].ignore;
         })
         .map((key) => {
